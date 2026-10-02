@@ -56,17 +56,15 @@ final class DartPadSdk {
 
   /// Creates a worker and waits for its session handshake.
   ///
-  /// Aborting [signal] while initialization is pending terminates the native
-  /// worker and fails the returned future with a [StateError]. Once this future
-  /// completes, the caller owns the worker and must use [DartPad.dispose].
+  /// Completing [abortTrigger], normally or with an error, while initialization
+  /// is pending terminates the native worker and fails the returned future with
+  /// a [StateError]. Once startup succeeds, the caller owns the worker and must
+  /// use [DartPad.dispose]; completing [abortTrigger] then has no effect.
   Future<DartPad> dedicatedWorker({
     Uri? pubHostedUrl,
-    web.AbortSignal? signal,
+    Future<void>? abortTrigger,
   }) async {
     StateError cancelled() => StateError('DartPad worker startup was aborted.');
-    if (signal?.aborted ?? false) {
-      throw cancelled();
-    }
     // The assetBaseUrl might be on a different origin, so we'll create a small
     // blob object URL importing worker.js and setting up a session.
     //
@@ -102,12 +100,15 @@ final class DartPadSdk {
     }
 
     final session = Completer<web.MessagePort>();
-    final onAbort = ((web.Event _) {
+    var aborted = false;
+    void abortStartup() {
+      aborted = true;
       stop();
       if (!session.isCompleted) {
         session.completeError(cancelled());
       }
-    }).toJS;
+    }
+
     final onError = ((web.Event event) {
       web.console.error('Unhandled error from worker:'.toJS);
       web.console.error(event);
@@ -136,12 +137,17 @@ final class DartPadSdk {
       }
     }.toJS;
 
-    signal?.addEventListener('abort', onAbort);
+    // A cancellable subscription releases the callback when startup settles,
+    // even if the caller never completes the abort trigger.
+    final abortSubscription = abortTrigger?.asStream().listen(
+      (_) => abortStartup(),
+      onError: (Object error, StackTrace stackTrace) => abortStartup(),
+    );
     web.MessagePort? port;
     try {
       port = await session.future;
       // Cover cancellation between the handshake and this continuation.
-      if (signal?.aborted ?? false) {
+      if (aborted) {
         throw cancelled();
       }
       return DartPad._(jsonRpcMessagePortChannel(port), worker, blobUrl);
@@ -151,8 +157,8 @@ final class DartPadSdk {
       stop();
       rethrow;
     } finally {
-      signal?.removeEventListener('abort', onAbort);
       worker.onmessage = null;
+      await abortSubscription?.cancel();
     }
   }
 

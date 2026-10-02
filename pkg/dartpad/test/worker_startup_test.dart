@@ -5,6 +5,7 @@
 @TestOn('browser')
 library;
 
+import 'dart:async';
 import 'dart:js_interop';
 import 'dart:js_interop_unsafe';
 
@@ -96,12 +97,31 @@ void main() {
 
   tearDownAll(() => evaluate('dartpadWorkerTest.restore();'));
 
-  test('an already aborted signal creates no worker or Blob URL', () async {
-    final abort = web.AbortController()..abort();
-    await expectLater(
-      sdk.dedicatedWorker(signal: abort.signal),
-      throwsA(isA<StateError>()),
+  test(
+    'an already completed trigger aborts startup and releases resources',
+    () async {
+      final abort = Completer<void>()..complete();
+      await expectLater(
+        sdk.dedicatedWorker(abortTrigger: abort.future),
+        throwsA(isA<StateError>()),
+      );
+      expect(liveWorkers, 0);
+      expect(liveBlobUrls, 0);
+    },
+  );
+
+  test('an error completion also requests cancellation', () async {
+    final abort = Completer<void>();
+    final started = sdk.dedicatedWorker(
+      abortTrigger: abort.future,
+      pubHostedUrl: pending,
     );
+    started.ignore();
+    await waitForInitialization(1);
+
+    abort.completeError(StateError('Caller failed during startup'));
+
+    await expectLater(started, throwsA(isA<StateError>()));
     expect(liveWorkers, 0);
     expect(liveBlobUrls, 0);
   });
@@ -109,9 +129,9 @@ void main() {
   test(
     'abort terminates a pending worker without its session handshake',
     () async {
-      final abort = web.AbortController();
+      final abort = Completer<void>();
       final started = sdk.dedicatedWorker(
-        signal: abort.signal,
+        abortTrigger: abort.future,
         pubHostedUrl: pending,
       );
       started.ignore();
@@ -119,38 +139,36 @@ void main() {
       expect(liveWorkers, 1);
       expect(liveBlobUrls, 1);
 
-      abort.abort();
+      abort.complete();
 
-      // Termination and Blob cleanup happen synchronously in the abort listener.
+      // Completing the trigger schedules cancellation without a handshake.
+      await expectLater(started, throwsA(isA<StateError>()));
       expect(liveWorkers, 0);
       expect(liveBlobUrls, 0);
-      await expectLater(started, throwsA(isA<StateError>()));
-      abort.abort();
-      expect(liveWorkers, 0);
     },
   );
 
   test('aborting one start leaves another pending start alive', () async {
-    final firstAbort = web.AbortController();
-    final secondAbort = web.AbortController();
+    final firstAbort = Completer<void>();
+    final secondAbort = Completer<void>();
     final first = sdk.dedicatedWorker(
-      signal: firstAbort.signal,
+      abortTrigger: firstAbort.future,
       pubHostedUrl: pending,
     );
     final second = sdk.dedicatedWorker(
-      signal: secondAbort.signal,
+      abortTrigger: secondAbort.future,
       pubHostedUrl: pending,
     );
     first.ignore();
     second.ignore();
     await waitForInitialization(2);
 
-    firstAbort.abort();
+    firstAbort.complete();
     await expectLater(first, throwsA(isA<StateError>()));
     expect(liveWorkers, 1);
     expect(liveBlobUrls, 1);
 
-    secondAbort.abort();
+    secondAbort.complete();
     await expectLater(second, throwsA(isA<StateError>()));
     expect(liveWorkers, 0);
     expect(liveBlobUrls, 0);
@@ -182,18 +200,25 @@ void main() {
     },
   );
 
-  test('after the handshake the returned client owns disposal', () async {
-    final abort = web.AbortController();
-    final client = await sdk.dedicatedWorker(signal: abort.signal);
-    addTearDown(client.dispose);
+  for (final completeWithError in [false, true]) {
+    test('after the handshake the client owns disposal, '
+        'trigger completes with error=$completeWithError', () async {
+      final abort = Completer<void>();
+      final client = await sdk.dedicatedWorker(abortTrigger: abort.future);
+      addTearDown(client.dispose);
 
-    abort.abort();
-    await pumpEventQueue();
-    expect(liveWorkers, 1);
-    expect(liveBlobUrls, 1);
+      if (completeWithError) {
+        abort.completeError(StateError('Caller failed after startup'));
+      } else {
+        abort.complete();
+      }
+      await pumpEventQueue();
+      expect(liveWorkers, 1);
+      expect(liveBlobUrls, 1);
 
-    await client.dispose();
-    expect(liveWorkers, 0);
-    expect(liveBlobUrls, 0);
-  });
+      await client.dispose();
+      expect(liveWorkers, 0);
+      expect(liveBlobUrls, 0);
+    });
+  }
 }

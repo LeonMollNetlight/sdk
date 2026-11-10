@@ -1710,6 +1710,11 @@ if (!self.deferred_loader) {
       if (!this.hotRestartInProgress) {
         throw 'Error: Hot restart end called without a corresponding start.';
       }
+      // The outgoing runtime installed symbols on native constructors and
+      // prototypes, which outlive its libraries. Release those roots first.
+      const runtime = this.libraries['dart:_runtime'];
+      runtime.hotRestart();
+      runtime.disposeNativeExtensions();
       // Clear all libraries.
       this.libraries = Object.create(null);
       this.triggeredSDKLibrariesWithSideEffects = false;
@@ -1746,6 +1751,11 @@ if (!self.deferred_loader) {
       if (!this.savedEntryPointLibraryName) {
         throw 'Error: Hot restart requested before application started.';
       }
+      // The outgoing runtime installed symbols on native constructors and
+      // prototypes, which outlive its libraries. Release those roots first.
+      const runtime = this.libraries['dart:_runtime'];
+      runtime.hotRestart();
+      runtime.disposeNativeExtensions();
       // Clear all libraries.
       this.libraries = Object.create(null);
       this.triggeredSDKLibrariesWithSideEffects = false;

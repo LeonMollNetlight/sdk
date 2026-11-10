@@ -435,6 +435,39 @@ void _installIdentityEquals() {
 
 final _extensionMap = JS('', 'new Map()');
 
+// Native constructors and prototypes outlive a hot restart. Track only keys
+// installed by this runtime so unrelated JavaScript properties are preserved.
+// Weak targets avoid retaining other frames whose extensions were installed.
+final _nativeExtensionKeys = JS<Object>('!', 'new WeakMap()');
+final _nativeExtensionTargets = JS<Object>('!', '[]');
+
+void _recordNativeExtensionKeys(Object target, Object originalKeys) =>
+    JS('', '''(() => {
+  let installedKeys = $_nativeExtensionKeys.get($target);
+  if (!installedKeys) {
+    $_nativeExtensionKeys.set($target, installedKeys = new Set());
+    $_nativeExtensionTargets.push(new WeakRef($target));
+  }
+  for (const key of Reflect.ownKeys($target)) {
+    if (!$originalKeys.has(key)) installedKeys.add(key);
+  }
+})()''');
+
+/// Removes native extensions before the module loader discards this runtime.
+///
+/// The legacy module loader reuses its runtime and must not call this method.
+void disposeNativeExtensions() => JS('', '''(() => {
+  for (const ref of $_nativeExtensionTargets) {
+    const target = ref.deref();
+    if (target == null) continue;
+    const installedKeys = $_nativeExtensionKeys.get(target);
+    for (const key of installedKeys) delete target[key];
+    $_nativeExtensionKeys.delete(target);
+  }
+  $_nativeExtensionTargets.length = 0;
+  delete $global_[$_polyfilled];
+})()''');
+
 /// Adds Dart properties to native JS types.
 void _applyExtension(jsType, dartExtType) {
   // Exit early when encountering a JS type without a prototype (such as
@@ -452,6 +485,13 @@ void _applyExtension(jsType, dartExtType) {
     );
     return;
   }
+
+  var originalTypeKeys = JS<Object>('!', 'new Set(Reflect.ownKeys(#))', jsType);
+  var originalPrototypeKeys = JS<Object>(
+    '!',
+    'new Set(Reflect.ownKeys(#))',
+    jsProto,
+  );
 
   _installProperties(
     jsProto,
@@ -485,6 +525,8 @@ void _applyExtension(jsType, dartExtType) {
   JS('', '#[#] = #[#]', jsType, _fieldSig, dartExtType, _fieldSig);
   JS('', '#[#] = #[#]', jsType, _getterSig, dartExtType, _getterSig);
   JS('', '#[#] = #[#]', jsType, _setterSig, dartExtType, _setterSig);
+  _recordNativeExtensionKeys(jsType, originalTypeKeys);
+  _recordNativeExtensionKeys(jsProto, originalPrototypeKeys);
 }
 
 /// Apply the previously registered extension to the type of [nativeObject].
